@@ -13,29 +13,34 @@ abstract class StableLockingArbiterLike[T <: Data](gen: T, n: Int, count: Int, n
   val lockIdx = Reg(init=UInt(n-1))
   val chosen = Wire(UInt(width = log2Up(n)))
 
+  io.chosen := chosen
   for ((g, i) <- grant.zipWithIndex)
     io.in(i).ready := Mux(locked, lockIdx === UInt(i), g) && io.out.ready
   io.out.valid := io.in(chosen).valid
   io.out.bits := io.in(chosen).bits
-  io.chosen := Mux(locked, lockIdx, OHToUInt(grant))
 
   if(count == 1){
     when(io.out.valid) {
       locked := !io.out.ready
       when(!locked) {
-        lockIdx = OHToUInt(grant)
+        lockIdx := chosen
       }
     }
   } else {
     val cnt = Reg(init=UInt(0, width = log2Up(count)))
     val cnt_next = cnt + UInt(1)
     when(io.out.valid) {
-      locked := !io.out.ready || !(cnt_next === UInt(0))
       when(!locked) {
-        lockIdx = OHToUInt(grant)
+        lockIdx := chosen
+        locked := !io.out.ready
       }
-      when(io.out.ready && needsLock.map(_(io.out.bits)).getOrElse(Bool(true))) {
-        cnt := cnt_next
+      when(io.out.ready) {
+        when(needsLock.map(_(io.out.bits)).getOrElse(Bool(true))) {
+          cnt := cnt_next
+          locked := !(cnt_next === UInt(0))
+        }.otherwise{
+          locked := Bool(false)
+        }
       }
     }
   }
@@ -47,6 +52,12 @@ abstract class StableLockingArbiterLike[T <: Data](gen: T, n: Int, count: Int, n
 class StableLockingArbiter[T <: Data](gen: T, n: Int, count: Int, needsLock: Option[T => Bool] = None) 
     extends StableLockingArbiterLike[T](gen, n, count, needsLock) {
   def grant: Seq[Bool] = ArbiterCtrl(io.in.map(_.valid))
+
+  var choose = UInt(n-1)
+  for (i <- n-2 to 0 by -1) {
+    choose = Mux(io.in(i).valid, UInt(i), choose)
+  }
+  chosen := Mux(locked, lockIdx, choose)
 }
 
 class StableArbiter[T <: Data](gen: T, n: Int) extends StableLockingArbiter[T](gen, n, 1)
@@ -62,7 +73,14 @@ class StableLockingRRArbiter[T <: Data](gen: T, n: Int, count: Int, needsLock: O
     (0 until n).map(i => ctrl(i) && UInt(i) > last_grant || ctrl(i + n))
   }
 
-  when (io.out.fire()) { last_grant := lockIdx }
+  when (io.out.fire()) { last_grant := chosen }
+
+  var choose = UInt(n-1)
+  for (i <- n-2 to 0 by -1)
+    choose = Mux(io.in(i).valid, UInt(i), choose)
+  for (i <- n-1 to 1 by -1)
+    choose = Mux(io.in(i).valid && UInt(i) > last_grant, UInt(i), choose)
+  chosen := Mux(locked, lockIdx, choose)
 }
 
 class StableRRArbiter[T <: Data](gen:T, n: Int) extends StableLockingRRArbiter[T](gen, n, 1)
